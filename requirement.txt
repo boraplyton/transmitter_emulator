@@ -1,0 +1,4 @@
+evdev==1.9.2
+pygame==2.6.1
+pyserial==3.5
+pyvjoy==1.0.1

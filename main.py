@@ -1,29 +1,40 @@
 import time
-import sys
 import pygame
 import serial
+import json, os, sys
 
-MIN_US, MID_US, MAX_US = 1000, 1500, 2000
+# === загрузка конфигурации ===
+CONFIG_FILE = "config.json"
+if not os.path.exists(CONFIG_FILE):
+    print(f"[config] Файл {CONFIG_FILE} не найден!")
+    sys.exit(1)
 
-CANDIDATE_PORTS = [
-    "/dev/ttyUSB0", "/dev/ttyUSB1",
-    "/dev/ttyACM0", "/dev/ttyACM1",
-    "COM3", "COM4", "COM5"
-]
-BAUD = 115200
-SEND_HZ = 50
-STEP = 2
-FAST_STEP = 5
-RETURN_SPEED = 25
-BUFF_SIZE = 200
+with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+    cfg = json.load(f)
 
+# ==== применяем параметры ====
+serial_cfg = cfg.get("serial", {})
+ui_cfg = cfg.get("ui", {})
+ctrl_cfg = cfg.get("control", {})
+
+CANDIDATE_PORTS = serial_cfg.get("ports", [])
+BAUD = serial_cfg.get("baud", 115200)
+
+MIN_US = ctrl_cfg.get("min_us", 1000)
+MID_US = ctrl_cfg.get("mid_us", 1500)
+MAX_US = ctrl_cfg.get("max_us", 2000)
+STEP = ctrl_cfg.get("step", 2)
+FAST_STEP = ctrl_cfg.get("fast_step", 5)
+BUFF_SIZE = ctrl_cfg.get("buff_size", 200)
+RETURN_SPEED = ui_cfg.get("return_speed", 25)
+SEND_HZ = ui_cfg.get("send_hz", 50)
 
 # === вспомогательные функции ===
-def clamp(v, lo=MIN_US, hi=MAX_US): return lo if v < lo else hi if v > hi else v
+def clamp(v, lo=MIN_US, hi=MAX_US):
+    return lo if v < lo else hi if v > hi else v
 
-
-def is_mid(v): return MID_US - BUFF_SIZE <= v <= MID_US + BUFF_SIZE
-
+def is_mid(v):
+    return MID_US - BUFF_SIZE <= v <= MID_US + BUFF_SIZE
 
 def next_three(v):
     """циклический переключатель 3 положения"""
@@ -33,7 +44,6 @@ def next_three(v):
         return MAX_US
     else:
         return MIN_US
-
 
 def try_open_port():
     for p in CANDIDATE_PORTS:
@@ -47,7 +57,6 @@ def try_open_port():
     print("[serial] no port — running in NO SERIAL mode")
     return None, "OFF"
 
-
 def send_line(ser, ch):
     if ser is None:
         return
@@ -56,7 +65,6 @@ def send_line(ser, ch):
         ser.write(line.encode("ascii"))
     except Exception as e:
         print(f"[serial] write error: {e}")
-
 
 # === отрисовка ===
 def draw_ui(screen, font, font_small, ch, fps, portname, ser_connected):
@@ -71,6 +79,12 @@ def draw_ui(screen, font, font_small, ch, fps, portname, ser_connected):
     else:
         header = font.render(f"NO SERIAL CONNECTION", True, (255, 60, 60))
     screen.blit(header, (40, 20))
+
+    # ### new: отображение статуса ARM/DISARM
+    arm_state = "ARMED" if ch[7] > MID_US else "DISARMED"
+    arm_color = (0, 255, 0) if ch[7] > MID_US else (255, 60, 60)
+    arm_label = font.render(f"{arm_state}", True, arm_color)
+    screen.blit(arm_label, (w - 250, 20))
 
     for i, v in enumerate(ch):
         y = top + i * (bar_h + gap)
@@ -101,12 +115,12 @@ def draw_ui(screen, font, font_small, ch, fps, portname, ser_connected):
     help_lines = [
         "Right stick: ←/→ = CH1 (Roll), ↑/↓ = CH2 (Pitch)",
         "Left stick: W/S = CH3 (Throttle), A/D = CH4 (Yaw)",
-        "AUX 1..4 = CH5..CH8 (3-position) | C: center (CH3->MIN) | X: all MIN | Shift: fast | Esc: exit",
+        "AUX 5–8 = 3-pos switches (5–8 keys) | Space = kill throttle | C = reset AUX | Esc = exit",
+        "CH8 controls ARM state: DISARMED = sticks locked"
     ]
     for j, tline in enumerate(help_lines):
         tip = font_small.render(tline, True, (190, 190, 200))
         screen.blit(tip, (40, h - 100 + j * 26))
-
 
 # === основная логика ===
 def main():
@@ -143,25 +157,29 @@ def main():
                 if event.key == pygame.K_ESCAPE:
                     running = False
                 # трёхтактные AUX
-                elif event.key == pygame.K_5:
-                    ch[4] = next_three(ch[4])
-                elif event.key == pygame.K_6:
-                    ch[5] = next_three(ch[5])
-                elif event.key == pygame.K_7:
-                    ch[6] = next_three(ch[6])
-                elif event.key == pygame.K_8:
-                    ch[7] = next_three(ch[7])
+                elif event.key == pygame.K_5: ch[4] = next_three(ch[4])
+                elif event.key == pygame.K_6: ch[5] = next_three(ch[5])
+                elif event.key == pygame.K_7: ch[6] = next_three(ch[6])
+                elif event.key == pygame.K_8: ch[7] = next_three(ch[7])
                 elif event.key == pygame.K_SPACE: ch[2] = MIN_US
+                elif event.key == pygame.K_c:
+                    for i in range(4, 8): ch[i] = MIN_US
 
-        # управление стиками
-        if keys[pygame.K_LEFT]:  ch[0] = clamp(ch[0] - step)
-        if keys[pygame.K_RIGHT]: ch[0] = clamp(ch[0] + step)
-        if keys[pygame.K_UP]:    ch[1] = clamp(ch[1] + step)
-        if keys[pygame.K_DOWN]:  ch[1] = clamp(ch[1] - step)
-        if keys[pygame.K_w]: ch[2] = clamp(ch[2] + step)
-        if keys[pygame.K_s]: ch[2] = clamp(ch[2] - step)
-        if keys[pygame.K_a]: ch[3] = clamp(ch[3] - step)
-        if keys[pygame.K_d]: ch[3] = clamp(ch[3] + step)
+        # ### new: проверка ARM-состояния
+        armed = ch[7] > MID_US
+        if not armed:
+            # DISARMED → обнуляем газ и блокируем стики
+            ch[2] = MIN_US
+        else:
+            # управление стиками (только при ARM)
+            if keys[pygame.K_LEFT]:  ch[0] = clamp(ch[0] - step)
+            if keys[pygame.K_RIGHT]: ch[0] = clamp(ch[0] + step)
+            if keys[pygame.K_UP]:    ch[1] = clamp(ch[1] + step)
+            if keys[pygame.K_DOWN]:  ch[1] = clamp(ch[1] - step)
+            if keys[pygame.K_w]: ch[2] = clamp(ch[2] + step)
+            if keys[pygame.K_s]: ch[2] = clamp(ch[2] - step)
+            if keys[pygame.K_a]: ch[3] = clamp(ch[3] - step)
+            if keys[pygame.K_d]: ch[3] = clamp(ch[3] + step)
 
         # возврат стиков в центр (CH1, CH2, CH4)
         def approach(v, target, delta):

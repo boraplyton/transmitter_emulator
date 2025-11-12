@@ -1,0 +1,14 @@
+{
+  "serial": {
+    "ports": ["/dev/ttyUSB0", "/dev/ttyACM0", "COM3", "COM4"],
+    "baud": 115200
+  },
+  "control": {
+    "min_us": 1000,
+    "mid_us": 1500,
+    "max_us": 2000,
+    "step": 2,
+    "fast_step": 5,
+    "buff_size": 200
+  }
+}
