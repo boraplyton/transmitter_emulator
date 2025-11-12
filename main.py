@@ -29,12 +29,15 @@ BUFF_SIZE = ctrl_cfg.get("buff_size", 200)
 RETURN_SPEED = ui_cfg.get("return_speed", 25)
 SEND_HZ = ui_cfg.get("send_hz", 50)
 
+
 # === вспомогательные функции ===
 def clamp(v, lo=MIN_US, hi=MAX_US):
     return lo if v < lo else hi if v > hi else v
 
+
 def is_mid(v):
     return MID_US - BUFF_SIZE <= v <= MID_US + BUFF_SIZE
+
 
 def next_three(v):
     """циклический переключатель 3 положения"""
@@ -44,6 +47,7 @@ def next_three(v):
         return MAX_US
     else:
         return MIN_US
+
 
 def try_open_port():
     for p in CANDIDATE_PORTS:
@@ -57,6 +61,7 @@ def try_open_port():
     print("[serial] no port — running in NO SERIAL mode")
     return None, "OFF"
 
+
 def send_line(ser, ch):
     if ser is None:
         return
@@ -65,6 +70,7 @@ def send_line(ser, ch):
         ser.write(line.encode("ascii"))
     except Exception as e:
         print(f"[serial] write error: {e}")
+
 
 # === отрисовка ===
 def draw_ui(screen, font, font_small, ch, fps, portname, ser_connected):
@@ -80,9 +86,10 @@ def draw_ui(screen, font, font_small, ch, fps, portname, ser_connected):
         header = font.render(f"NO SERIAL CONNECTION", True, (255, 60, 60))
     screen.blit(header, (40, 20))
 
-    # ### new: отображение статуса ARM/DISARM
-    arm_state = "ARMED" if ch[7] > MID_US else "DISARMED"
-    arm_color = (0, 255, 0) if ch[7] > MID_US else (255, 60, 60)
+    # ARM/DISARM
+    armed = ch[7] > MID_US
+    arm_state = "ARMED" if armed else "DISARMED"
+    arm_color = (0, 255, 0) if armed else (255, 60, 60)
     arm_label = font.render(f"{arm_state}", True, arm_color)
     screen.blit(arm_label, (w - 250, 20))
 
@@ -101,7 +108,7 @@ def draw_ui(screen, font, font_small, ch, fps, portname, ser_connected):
         cx = left + int(bar_w * (MID_US - MIN_US) / (MAX_US - MIN_US))
         pygame.draw.line(screen, (100, 100, 120), (cx, y), (cx, y + bar_h), 1)
 
-        # подписи ON/OFF/3 pos для AUX
+        # подписи для AUX
         if i >= 4:
             if v <= MIN_US + 10:
                 state = ("LOW", (255, 120, 120))
@@ -115,12 +122,13 @@ def draw_ui(screen, font, font_small, ch, fps, portname, ser_connected):
     help_lines = [
         "Right stick: ←/→ = CH1 (Roll), ↑/↓ = CH2 (Pitch)",
         "Left stick: W/S = CH3 (Throttle), A/D = CH4 (Yaw)",
-        "AUX 5–8 = 3-pos switches (5–8 keys) | Space = kill throttle | C = reset AUX | Esc = exit",
-        "CH8 controls ARM state: DISARMED = sticks locked"
+        "AUX 5–8 = 3-pos (5–8) | Space=kill throttle | C=reset AUX | Esc=exit",
+        "CH8→ARM: DISARMED блокирует CH1–CH4 и CH5–CH7, газ=0"
     ]
     for j, tline in enumerate(help_lines):
         tip = font_small.render(tline, True, (190, 190, 200))
         screen.blit(tip, (40, h - 100 + j * 26))
+
 
 # === основная логика ===
 def main():
@@ -150,26 +158,44 @@ def main():
         fast = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
         step = FAST_STEP if fast else STEP
 
+        # вычисляем ARM до обработки клавиш (для блокировки 5–7)
+        armed = ch[7] > MID_US
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
-                # трёхтактные AUX
-                elif event.key == pygame.K_5: ch[4] = next_three(ch[4])
-                elif event.key == pygame.K_6: ch[5] = next_three(ch[5])
-                elif event.key == pygame.K_7: ch[6] = next_three(ch[6])
-                elif event.key == pygame.K_8: ch[7] = next_three(ch[7])
-                elif event.key == pygame.K_SPACE: ch[2] = MIN_US
-                elif event.key == pygame.K_c:
-                    for i in range(4, 8): ch[i] = MIN_US
 
-        # ### new: проверка ARM-состояния
+                # трёхтактные AUX: 5–7 работают ТОЛЬКО при ARM
+                if event.key == pygame.K_5 and armed:
+                    ch[4] = next_three(ch[4])
+                elif event.key == pygame.K_6 and armed:
+                    ch[5] = next_three(ch[5])
+                elif event.key == pygame.K_7 and armed:
+                    ch[6] = next_three(ch[6])
+
+                # CH8 (ARM/DISARM) — всегда разрешён
+                elif event.key == pygame.K_8:
+                    ch[7] = next_three(ch[7])
+
+                elif event.key == pygame.K_SPACE:
+                    ch[2] = MIN_US
+                elif event.key == pygame.K_c:
+                    # Сбрасываем AUX, но CH5–CH7 всё равно будут зажаты в MIN при DISARM
+                    for i in range(4, 8):
+                        ch[i] = MIN_US
+
+        # пересчитываем ARM после возможного изменения CH8
         armed = ch[7] > MID_US
+
         if not armed:
-            # DISARMED → обнуляем газ и блокируем стики
+            # DISARMED → газ=0, CH5–CH7 = MIN, стики заблокированы
             ch[2] = MIN_US
+            ch[4] = MIN_US
+            ch[5] = MIN_US
+            ch[6] = MIN_US
         else:
             # управление стиками (только при ARM)
             if keys[pygame.K_LEFT]:  ch[0] = clamp(ch[0] - step)
@@ -181,7 +207,7 @@ def main():
             if keys[pygame.K_a]: ch[3] = clamp(ch[3] - step)
             if keys[pygame.K_d]: ch[3] = clamp(ch[3] + step)
 
-        # возврат стиков в центр (CH1, CH2, CH4)
+        # возврат стиков в центр (CH1, CH2, CH4) — визуально центрируем всегда
         def approach(v, target, delta):
             if v < target - delta: return v + delta
             if v > target + delta: return v - delta
