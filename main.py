@@ -3,6 +3,8 @@ import pygame
 import serial
 import json, os, sys
 
+from djitellopy import Tello  # <<< Tello
+
 # === загрузка конфигурации ===
 CONFIG_FILE = "config.json"
 if not os.path.exists(CONFIG_FILE):
@@ -29,6 +31,16 @@ BUFF_SIZE = ctrl_cfg.get("buff_size", 200)
 RETURN_SPEED = ui_cfg.get("return_speed", 25)
 SEND_HZ = ui_cfg.get("send_hz", 50)
 
+# ---------- настройки Tello ----------
+TELLO_MANUAL_SPEED = 40      # ручное управление
+TELLO_AUTO_SPEED = 30        # авто-полет (M) влево/вправо
+TELLO_AUTO_INTERVAL = 2.0    # каждые N секунд меняем направление
+
+TELLO_SQUARE_SPEED = 20      # квадрат (N) — маленький для квартиры
+TELLO_SQUARE_STEP_TIME = 2.0 # длительность одной стороны квадрата
+
+TELLO_FPS = 20               # частота отправки RC-команд (ограничим через clock)
+
 
 # === вспомогательные функции ===
 def clamp(v, lo=MIN_US, hi=MAX_US):
@@ -39,14 +51,9 @@ def is_mid(v):
     return MID_US - BUFF_SIZE <= v <= MID_US + BUFF_SIZE
 
 
-def next_three(v):
-    """циклический переключатель 3 положения"""
-    if v <= MIN_US + 10:
-        return MID_US
-    elif v < MAX_US - 10:
-        return MAX_US
-    else:
-        return MIN_US
+def next_two(v):
+    """двухпозиционный переключатель: MIN <-> MAX"""
+    return MAX_US if v <= MIN_US + 10 else MIN_US
 
 
 def try_open_port():
@@ -73,42 +80,69 @@ def send_line(ser, ch):
 
 
 # === отрисовка ===
-def draw_ui(screen, font, font_small, ch, fps, portname, ser_connected):
-    screen.fill((15, 15, 18))
+def draw_ui(screen, font, font_small,
+            ch, fps, portname, ser_connected,
+            tello_connected, tello_flying,
+            auto_mode, square_mode,
+            tello_lr, tello_fb, tello_ud, tello_yw):
+
+    screen.fill((18, 18, 22))
     w, h = screen.get_size()
-    left, top = 180, 80
-    bar_w, bar_h, gap = w - left - 120, 45, 25
 
-    # статус строки
+    # =======================
+    #  Верхняя строка статуса
+    # =======================
+    # Serial status
     if ser_connected:
-        header = font.render(f"Serial: {portname}   FPS: {fps:.0f}", True, (220, 220, 220))
+        hdr = font.render(f"Serial: {portname} | FPS: {fps:.0f}", True, (230, 230, 230))
     else:
-        header = font.render(f"NO SERIAL CONNECTION", True, (255, 60, 60))
-    screen.blit(header, (40, 20))
+        hdr = font.render("NO SERIAL CONNECTION", True, (255, 70, 70))
+    screen.blit(hdr, (25, 20))
 
-    # ARM/DISARM
+    # Arm/Disarm status
     armed = ch[7] > MID_US
-    arm_state = "ARMED" if armed else "DISARMED"
+    arm_text = "ARMED" if armed else "DISARMED"
     arm_color = (0, 255, 0) if armed else (255, 60, 60)
-    arm_label = font.render(f"{arm_state}", True, arm_color)
-    screen.blit(arm_label, (w - 250, 20))
+    arm_lbl = font.render(arm_text, True, arm_color)
+    screen.blit(arm_lbl, (w - 200, 20))
+
+    # =======================
+    #  Левый блок — каналы
+    # =======================
+    left_x = 40
+    top_y = 80
+    bar_w = 460
+    bar_h = 40
+    gap = 18
 
     for i, v in enumerate(ch):
-        y = top + i * (bar_h + gap)
-        pygame.draw.rect(screen, (70, 70, 80), (left, y, bar_w, bar_h), 2, border_radius=8)
+        y = top_y + i * (bar_h + gap)
+
+        # рамка
+        pygame.draw.rect(screen, (70, 70, 80), (left_x, y, bar_w, bar_h), 2, border_radius=6)
+
+        # заполнение
         t = (v - MIN_US) / (MAX_US - MIN_US)
         fill = int(bar_w * t)
-        pygame.draw.rect(screen, (90, 170, 255), (left + 3, y + 3, max(0, fill - 6), bar_h - 6), 0, border_radius=8)
+        pygame.draw.rect(
+            screen, (90, 170, 255),
+            (left_x + 3, y + 3, max(fill - 6, 0), bar_h - 6),
+            border_radius=6
+        )
 
-        # подписи
-        label = font.render(f"CH{i + 1}", True, (230, 230, 240))
-        screen.blit(label, (60, y + 8))
-        val = font.render(str(v), True, (255, 255, 255))
-        screen.blit(val, (left + bar_w + 25, y + 8))
-        cx = left + int(bar_w * (MID_US - MIN_US) / (MAX_US - MIN_US))
-        pygame.draw.line(screen, (100, 100, 120), (cx, y), (cx, y + bar_h), 1)
+        # подпись канала
+        label = font_small.render(f"CH{i+1}", True, (230, 230, 240))
+        screen.blit(label, (left_x - 55, y + 8))
 
-        # подписи для AUX
+        # значение
+        val = font_small.render(str(v), True, (255, 255, 255))
+        screen.blit(val, (left_x + bar_w + 15, y + 8))
+
+        # центральная линия
+        cx = left_x + int(bar_w * (MID_US - MIN_US) / (MAX_US - MIN_US))
+        pygame.draw.line(screen, (110, 110, 130), (cx, y), (cx, y + bar_h), 1)
+
+        # LOW/MID/HIGH индикатор для AUX
         if i >= 4:
             if v <= MIN_US + 10:
                 state = ("LOW", (255, 120, 120))
@@ -117,35 +151,113 @@ def draw_ui(screen, font, font_small, ch, fps, portname, ser_connected):
             else:
                 state = ("MID", (255, 255, 120))
             txt = font_small.render(state[0], True, state[1])
-            screen.blit(txt, (20, y + 12))
+            screen.blit(txt, (left_x - 100, y + 10))
+
+    # =======================
+    #   Правый блок — подсказки
+    # =======================
+    help_x = 600
+    help_y = 80
+    line_h = 22
 
     help_lines = [
-        "Right stick: ←/→ = CH1 (Roll), ↑/↓ = CH2 (Pitch)",
-        "Left stick: W/S = CH3 (Throttle), A/D = CH4 (Yaw)",
-        "AUX 5–8 = 3-pos (5–8) | Space=kill throttle | C=reset AUX | Esc=exit",
-        "CH8→ARM: DISARMED блокирует CH1–CH4 и CH5–CH7, газ=0"
+        "PPM / TX12 Controls:",
+        "  ←/→ = CH1 (Roll)",
+        "  ↑/↓ = CH2 (Pitch)",
+        "  W/S = CH3 (Throttle)",
+        "  A/D = CH4 (Yaw)",
+        "  5/6/7 = AUX5–7",
+        "  8 = ARM/DISARM",
+        "  Space = kill AUX,  C = reset AUX",
+        "",
+        "Tello Controls:",
+        "  Коннект при запуске программы",
+        "  CH5 HIGH → Throw&Go через 1с",
+        "  g/j = yaw, y/h = up/down",
+        "  k/; = left/right",
+        "  o/l = forward/back",
+        "  M = маятник (авто)",
+        "  N = квадрат",
+        "  P = посадка",
     ]
-    for j, tline in enumerate(help_lines):
-        tip = font_small.render(tline, True, (190, 190, 200))
-        screen.blit(tip, (40, h - 100 + j * 26))
+
+    for n, line in enumerate(help_lines):
+        surf = font_small.render(line, True, (200, 200, 200))
+        screen.blit(surf, (help_x, help_y + n * line_h))
+
+    # ===========================
+    #   Нижняя строка — статус Tello
+    # ===========================
+    bottom_y = h - 50
+
+    t_color = (0, 255, 0) if tello_connected else (255, 80, 80)
+    t_text = f"Tello: {'CONNECTED' if tello_connected else 'NO CONNECTION'}"
+    screen.blit(font_small.render(t_text, True, t_color), (40, bottom_y))
+
+    flying_color = (0, 220, 0) if tello_flying else (200, 200, 80)
+    screen.blit(font_small.render(f"State: {'FLYING' if tello_flying else 'IDLE'}",
+                                  True, flying_color), (260, bottom_y))
+
+    screen.blit(font_small.render(f"Auto M: {'ON' if auto_mode else 'OFF'}",
+                                  True, (180, 220, 255)), (430, bottom_y))
+
+    screen.blit(font_small.render(f"Square N: {'ON' if square_mode else 'OFF'}",
+                                  True, (180, 220, 255)), (550, bottom_y))
+
+    rc_text = f"TELLO RC: LR={tello_lr} FB={tello_fb} UD={tello_ud} YW={tello_yw}"
+    screen.blit(font_small.render(rc_text, True, (120, 200, 255)), (760, bottom_y))
+
 
 
 # === основная логика ===
 def main():
+    # --- serial / PPM ---
     ser, portname = try_open_port()
     ser_connected = ser is not None
 
     pygame.init()
-    pygame.display.set_caption("PPM Keyboard → (Arduino) → TX12")
-    screen = pygame.display.set_mode((1280, 750))
+    pygame.display.set_caption("PPM + Tello Control")
+    screen = pygame.display.set_mode((1400, 800))
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("DejaVu Sans", 26)
-    font_small = pygame.font.SysFont("DejaVu Sans", 20)
+    font_small = pygame.font.SysFont("DejaVu Sans", 18)
 
-    # каналы
+    # --- Tello ---
+    drone = None
+    tello_connected = False
+    tello_flying = False
+    tello_takeoff_time = None  # когда делать Throw&Go
+
+    # состояния авторежимов Tello
+    auto_mode = False
+    auto_dir = 1
+    last_auto_switch = time.time()
+    prev_m_pressed = False
+
+    square_mode = False
+    square_step = 0
+    square_last_switch = time.time()
+    prev_n_pressed = False
+
+    print("[tello] connecting...")
+    try:
+        drone = Tello()
+        drone.connect()
+        try:
+            batt = drone.get_battery()
+            print(f"[tello] battery: {batt}%")
+        except Exception:
+            print("[tello] battery read failed")
+        tello_connected = True
+    except Exception as e:
+        print(f"[tello] connect failed: {e}")
+        drone = None
+        tello_connected = False
+
+    # --- каналы ---
     ch = [MID_US] * 8
     ch[2] = MIN_US  # Throttle
-    for i in range(4, 8):  # AUX стартуют в MIN
+    for i in range(4, 8):
         ch[i] = MIN_US
 
     send_interval = 1.0 / SEND_HZ
@@ -153,61 +265,88 @@ def main():
 
     running = True
     while running:
-        dt = clock.tick(120) / 1000.0
+        dt = clock.tick( max(120, TELLO_FPS*2) ) / 1000.0
         keys = pygame.key.get_pressed()
         fast = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
         step = FAST_STEP if fast else STEP
 
-        # вычисляем ARM до обработки клавиш (для блокировки 5–7)
         armed = ch[7] > MID_US
 
+        # --- обработка событий ---
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
+                    # при ESC попробуем посадить Tello, потом выйдем
+                    if tello_connected and drone is not None and tello_flying:
+                        print("[tello] ESC → посадка")
+                        try:
+                            drone.land()
+                        except Exception as e:
+                            print(f"[tello] land error: {e}")
+                        tello_flying = False
                     running = False
 
-                # трёхтактные AUX: 5–7 работают ТОЛЬКО при ARM
+                # CH5–CH7: двухпозиционные, работают ТОЛЬКО при ARM
                 if event.key == pygame.K_5 and armed:
-                    ch[4] = next_three(ch[4])
+                    prev_ch5 = ch[4]
+                    ch[4] = next_two(ch[4])
+
+                    # LOW -> HIGH: планируем Throw&Go
+                    if tello_connected and drone is not None:
+                        if prev_ch5 <= MIN_US + 10 and ch[4] >= MAX_US - 10:
+                            tello_takeoff_time = time.time()
+                            print("[tello] CH5 HIGH → Throw&Go через 1с, приготовься подбросить дрон")
+
                 elif event.key == pygame.K_6 and armed:
-                    ch[5] = next_three(ch[5])
+                    ch[5] = next_two(ch[5])
                 elif event.key == pygame.K_7 and armed:
-                    ch[6] = next_three(ch[6])
+                    ch[6] = next_two(ch[6])
 
-                # CH8 (ARM/DISARM) — всегда разрешён
+                # CH8 (ARM/DISARM)
                 elif event.key == pygame.K_8:
-                    ch[7] = next_three(ch[7])
+                    ch[7] = next_two(ch[7])
 
-                elif event.key == pygame.K_SPACE:
-                    ch[2] = MIN_US
                 elif event.key == pygame.K_c:
-                    # Сбрасываем AUX, но CH5–CH7 всё равно будут зажаты в MIN при DISARM
+                    for i in range(4, 8):
+                        ch[i] = MIN_US
+                elif event.key == pygame.K_SPACE:
                     for i in range(4, 8):
                         ch[i] = MIN_US
 
-        # пересчитываем ARM после возможного изменения CH8
+                # посадка Tello по P (однократное событие)
+                elif event.key == pygame.K_p:
+                    if tello_connected and drone is not None and tello_flying:
+                        print("[tello] P → посадка")
+                        try:
+                            drone.land()
+                        except Exception as e:
+                            print(f"[tello] land error: {e}")
+                        tello_flying = False
+                        auto_mode = False
+                        square_mode = False
+
+        # пересчитываем ARM
         armed = ch[7] > MID_US
 
+        # --- PPM: блокировка при DISARM ---
         if not armed:
-            # DISARMED → газ=0, CH5–CH7 = MIN, стики заблокированы
             ch[2] = MIN_US
             ch[4] = MIN_US
             ch[5] = MIN_US
             ch[6] = MIN_US
         else:
-            # управление стиками (только при ARM)
             if keys[pygame.K_LEFT]:  ch[0] = clamp(ch[0] - step)
             if keys[pygame.K_RIGHT]: ch[0] = clamp(ch[0] + step)
             if keys[pygame.K_UP]:    ch[1] = clamp(ch[1] + step)
             if keys[pygame.K_DOWN]:  ch[1] = clamp(ch[1] - step)
-            if keys[pygame.K_w]: ch[2] = clamp(ch[2] + step)
-            if keys[pygame.K_s]: ch[2] = clamp(ch[2] - step)
-            if keys[pygame.K_a]: ch[3] = clamp(ch[3] - step)
-            if keys[pygame.K_d]: ch[3] = clamp(ch[3] + step)
+            if keys[pygame.K_w]:     ch[2] = clamp(ch[2] + step)
+            if keys[pygame.K_s]:     ch[2] = clamp(ch[2] - step)
+            if keys[pygame.K_a]:     ch[3] = clamp(ch[3] - step)
+            if keys[pygame.K_d]:     ch[3] = clamp(ch[3] + step)
 
-        # возврат стиков в центр (CH1, CH2, CH4) — визуально центрируем всегда
+        # возврат стиков в центр (CH1, CH2, CH4)
         def approach(v, target, delta):
             if v < target - delta: return v + delta
             if v > target + delta: return v - delta
@@ -219,16 +358,141 @@ def main():
                     or (i == 3 and not (keys[pygame.K_a] or keys[pygame.K_d])):
                 ch[i] = approach(ch[i], MID_US, RETURN_SPEED)
 
-        # отправка
         now = time.time()
+
+        # --- Tello: запуск Throw&Go по таймеру ---
+        if tello_connected and drone is not None and tello_takeoff_time is not None:
+            if now >= tello_takeoff_time and not tello_flying:
+                print("[tello] Throw&Go — подбрось дрон!")
+                try:
+                    drone.initiate_throw_takeoff()
+                    tello_flying = True
+                except Exception as e:
+                    print(f"[tello] initiate_throw_takeoff error: {e}")
+                    tello_flying = False
+                tello_takeoff_time = None
+
+        # --- Tello управление ---
+        tello_lr = tello_fb = tello_ud = tello_yw = 0
+
+        if tello_connected and drone is not None and tello_flying:
+            # стики
+            if keys[pygame.K_g]:
+                tello_yw = -TELLO_MANUAL_SPEED
+            elif keys[pygame.K_j]:
+                tello_yw = TELLO_MANUAL_SPEED
+
+            if keys[pygame.K_y]:
+                tello_ud = TELLO_MANUAL_SPEED
+            elif keys[pygame.K_h]:
+                tello_ud = -TELLO_MANUAL_SPEED
+
+            if keys[pygame.K_k]:
+                tello_lr = -TELLO_MANUAL_SPEED
+            elif keys[pygame.K_SEMICOLON]:
+                tello_lr = TELLO_MANUAL_SPEED
+
+            if keys[pygame.K_o]:
+                tello_fb = TELLO_MANUAL_SPEED
+            elif keys[pygame.K_l]:
+                tello_fb = -TELLO_MANUAL_SPEED
+
+            # обработка M / N (как раньше)
+            m_pressed = keys[pygame.K_m]
+            if m_pressed and not prev_m_pressed:
+                auto_mode = not auto_mode
+                if auto_mode:
+                    square_mode = False
+                    auto_dir = 1
+                    last_auto_switch = now
+                    print("[tello] Auto mode (M) ON")
+                else:
+                    print("[tello] Auto mode (M) OFF")
+            prev_m_pressed = m_pressed
+
+            n_pressed = keys[pygame.K_n]
+            if n_pressed and not prev_n_pressed:
+                if not square_mode:
+                    square_mode = True
+                    auto_mode = False
+                    square_step = 0
+                    square_last_switch = now
+                    print("[tello] Square mode (N) START")
+            prev_n_pressed = n_pressed
+
+            manual_active = (tello_lr != 0 or tello_fb != 0 or tello_ud != 0 or tello_yw != 0)
+
+            if auto_mode and manual_active:
+                auto_mode = False
+                print("[tello] Auto mode OFF (перехват руками)")
+
+            if square_mode and manual_active:
+                square_mode = False
+                print("[tello] Square mode OFF (перехват руками)")
+
+            # логика квадрата
+            if square_mode and not manual_active:
+                directions = [
+                    (0,  TELLO_SQUARE_SPEED),
+                    (TELLO_SQUARE_SPEED, 0),
+                    (0, -TELLO_SQUARE_SPEED),
+                    (-TELLO_SQUARE_SPEED, 0),
+                ]
+                if square_step < len(directions):
+                    tello_lr, tello_fb = directions[square_step]
+                    if now - square_last_switch > TELLO_SQUARE_STEP_TIME:
+                        square_step += 1
+                        square_last_switch = now
+                else:
+                    square_mode = False
+                    tello_lr = tello_fb = 0
+                    print("[tello] Square mode DONE")
+
+            # логика маятника
+            elif auto_mode and not manual_active:
+                if now - last_auto_switch > TELLO_AUTO_INTERVAL:
+                    auto_dir *= -1
+                    last_auto_switch = now
+                tello_lr = auto_dir * TELLO_AUTO_SPEED
+                tello_fb = 0
+
+            # отправляем RC в Tello
+            try:
+                drone.send_rc_control(tello_lr, tello_fb, tello_ud, tello_yw)
+            except Exception as e:
+                print(f"[tello] send_rc_control error: {e}")
+
+        # --- отправка PPM ---
         if now - last_send >= send_interval:
             send_line(ser, ch)
             last_send = now
 
-        draw_ui(screen, font, font_small, ch, 1.0 / dt if dt > 0 else 0, portname, ser_connected)
+        # --- отрисовка ---
+        fps = 1.0 / dt if dt > 0 else 0.0
+        draw_ui(screen, font, font_small,
+                ch, fps, portname, ser_connected,
+                tello_connected, tello_flying,
+                auto_mode, square_mode,
+                tello_lr, tello_fb, tello_ud, tello_yw)
         pygame.display.flip()
 
-    if ser: ser.close()
+    # --- выход ---
+    if ser:
+        ser.close()
+
+    if tello_connected and drone is not None:
+        try:
+            print("[tello] final landing...")
+            drone.send_rc_control(0, 0, 0, 0)
+            if tello_flying:
+                drone.land()
+        except Exception as e:
+            print(f"[tello] final land error: {e}")
+        try:
+            drone.end()
+        except Exception:
+            pass
+
     pygame.quit()
 
 
