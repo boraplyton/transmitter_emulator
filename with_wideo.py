@@ -2,9 +2,14 @@ import time
 import pygame
 import serial
 import json, os, sys
+import argparse
 
-from djitellopy import Tello  # управление Tello
-import cv2                    # видео с камеры Tello
+from djitellopy import Tello
+import cv2
+
+from autoland import AutoLandController
+from autoback import AutoBackController
+
 
 # === загрузка конфигурации ===
 CONFIG_FILE = "config.json"
@@ -16,32 +21,34 @@ with open(CONFIG_FILE, "r", encoding="utf-8") as f:
     cfg = json.load(f)
 
 # ==== применяем параметры ====
-serial_cfg = cfg.get("serial", {})
-ui_cfg = cfg.get("ui", {})
-ctrl_cfg = cfg.get("control", {})
+serial_cfg    = cfg.get("serial", {})
+ui_cfg        = cfg.get("ui", {})
+ctrl_cfg      = cfg.get("control", {})
+tello_cfg     = cfg.get("tello", {})
+autoland_cfg  = cfg.get("autoland", {})
+autoback_cfg  = cfg.get("autoback", {})
 
 CANDIDATE_PORTS = serial_cfg.get("ports", [])
-BAUD = serial_cfg.get("baud", 115200)
+BAUD            = serial_cfg.get("baud", 115200)
 
-MIN_US = ctrl_cfg.get("min_us", 1000)
-MID_US = ctrl_cfg.get("mid_us", 1500)
-MAX_US = ctrl_cfg.get("max_us", 2000)
-STEP = ctrl_cfg.get("step", 2)
-FAST_STEP = ctrl_cfg.get("fast_step", 5)
+MIN_US    = ctrl_cfg.get("min_us", 1000)
+MID_US    = ctrl_cfg.get("mid_us", 1500)
+MAX_US    = ctrl_cfg.get("max_us", 2000)
+STEP      = ctrl_cfg.get("step", 2)
+FAST_STEP = ctrl_cfg.get("fast_step", 4)
 BUFF_SIZE = ctrl_cfg.get("buff_size", 200)
+
 RETURN_SPEED = ui_cfg.get("return_speed", 25)
-SEND_HZ = ui_cfg.get("send_hz", 50)
+SEND_HZ      = ui_cfg.get("send_hz", 50)
 
-# ---------- настройки Tello ----------
-TELLO_MANUAL_SPEED = 40        # ручное управление
-TELLO_AUTO_SPEED = 30          # авто-полет (M) влево/вправо
-TELLO_AUTO_INTERVAL = 2.0      # каждые N секунд меняем направление
-
-TELLO_SQUARE_SPEED = 20        # квадрат (N) — маленький для квартиры
-TELLO_SQUARE_STEP_TIME = 2.0   # длительность одной стороны квадрата, сек
-
-TELLO_FPS = 20                 # "целевая" частота отправки RC-команд
-TELLO_SIM_IF_NO_DRONE = True   # включать "симуляцию", если Tello не подключился
+# ---------- настройки Tello из конфига ----------
+TELLO_MANUAL_SPEED     = tello_cfg.get("manual_speed", 40)
+TELLO_AUTO_SPEED       = tello_cfg.get("auto_speed", 30)
+TELLO_AUTO_INTERVAL    = tello_cfg.get("auto_interval", 2.0)
+TELLO_SQUARE_SPEED     = tello_cfg.get("square_speed", 20)
+TELLO_SQUARE_STEP_TIME = tello_cfg.get("square_step_time", 2.0)
+TELLO_FPS              = tello_cfg.get("fps", 20)
+TELLO_SIM_IF_NO_DRONE  = tello_cfg.get("sim_if_no_drone", True)
 
 
 # === вспомогательные функции ===
@@ -51,6 +58,14 @@ def clamp(v, lo=MIN_US, hi=MAX_US):
 
 def is_mid(v):
     return MID_US - BUFF_SIZE <= v <= MID_US + BUFF_SIZE
+
+
+def approach(v, target, delta):
+    if v < target - delta:
+        return v + delta
+    if v > target + delta:
+        return v - delta
+    return target
 
 
 def next_two(v):
@@ -87,7 +102,8 @@ def draw_ui(screen, font, font_small,
             tello_connected, tello_simulation, tello_flying,
             auto_mode, square_mode,
             tello_lr, tello_fb, tello_ud, tello_yw,
-            video_surface):
+            video_surface,
+            autoland_mode):
 
     screen.fill((18, 18, 22))
     w, h = screen.get_size()
@@ -159,7 +175,6 @@ def draw_ui(screen, font, font_small,
     # =======================
     help_x = 600
     line_h = 22
-
     help_y_start = 80
 
     # Видео (если есть кадр)
@@ -177,10 +192,10 @@ def draw_ui(screen, font, font_small,
         "  A/D = CH4 (Yaw)",
         "  5/6/7 = AUX5–7 (2-pos)",
         "  8 = ARM/DISARM",
-        "  Space = kill AUX,  C = reset AUX",
+        "  Space = kill AUX",
         "",
         "Tello Controls:",
-        "  Коннект при запуске (если доступен).",
+        "  --tello для включения Tello-режима",
         "  CH5 HIGH (при ARM) → Throw&Go / симуляция взлёта.",
         "  g/j = yaw, y/h = up/down",
         "  k/; = left/right",
@@ -188,6 +203,11 @@ def draw_ui(screen, font, font_small,
         "  M = авто-маятник (LR)",
         "  N = маленький квадрат",
         "  P = посадка (или стоп симуляции)",
+        "",
+        "Big Drone:",
+        "  B = AutoLand FAST",
+        "  V = AutoLand SLOW",
+        "  X = AutoBack (цикл назад-вперёд)",
     ]
 
     for n, line in enumerate(help_lines):
@@ -224,9 +244,25 @@ def draw_ui(screen, font, font_small,
     rc_text = f"TELLO RC: LR={tello_lr} FB={tello_fb} UD={tello_ud} YW={tello_yw}"
     screen.blit(font_small.render(rc_text, True, (120, 200, 255)), (860, bottom_y))
 
+    # ---- статус автопосадки большого дрона ----
+    if autoland_mode is None:
+        land_txt = "AutoLand: OFF"
+        land_color = (160, 160, 160)
+    elif autoland_mode == "fast":
+        land_txt = "AutoLand: FAST"
+        land_color = (120, 255, 120)
+    else:  # "slow"
+        land_txt = "AutoLand: SLOW"
+        land_color = (255, 220, 120)
+
+    screen.blit(
+        font_small.render(land_txt, True, land_color),
+        (40, bottom_y + 24)
+    )
+
 
 # === основная логика ===
-def main():
+def main(args):
     # --- serial / PPM ---
     ser, portname = try_open_port()
     ser_connected = ser is not None
@@ -242,9 +278,9 @@ def main():
     drone = None
     frame_read = None
     tello_connected = False
-    tello_simulation = False        # режим "управление без дрона"
+    tello_simulation = False
     tello_flying = False
-    tello_takeoff_time = None       # когда делать Throw&Go / старт симуляции
+    tello_takeoff_time = None
 
     auto_mode = False
     auto_dir = 1
@@ -258,35 +294,60 @@ def main():
 
     tello_lr = tello_fb = tello_ud = tello_yw = 0
 
-    print("[tello] connecting...")
-    try:
-        drone = Tello()
-        drone.connect()
+    if args.tello:
+        print("[tello] connecting...")
         try:
-            batt = drone.get_battery()
-            print(f"[tello] battery: {batt}%")
-        except Exception:
-            print("[tello] battery read failed")
+            drone = Tello()
+            drone.connect()
+            try:
+                batt = drone.get_battery()
+                print(f"[tello] battery: {batt}%")
+            except Exception:
+                print("[tello] battery read failed")
 
-        # запускаем видео-поток
-        drone.streamon()
-        frame_read = drone.get_frame_read()
-
-        tello_connected = True
-    except Exception as e:
-        print(f"[tello] connect failed: {e}")
-        drone = None
-        tello_connected = False
-        frame_read = None
-        if TELLO_SIM_IF_NO_DRONE:
-            tello_simulation = True
-            print("[tello] simulation mode enabled (no physical drone)")
+            drone.streamon()
+            frame_read = drone.get_frame_read()
+            tello_connected = True
+        except Exception as e:
+            print(f"[tello] connect failed: {e}")
+            drone = None
+            tello_connected = False
+            frame_read = None
+            if TELLO_SIM_IF_NO_DRONE:
+                tello_simulation = True
+                print("[tello] simulation mode enabled (no physical drone)")
+    else:
+        print("[tello] disabled by CLI (no --tello)")
 
     # --- каналы PPM ---
     ch = [MID_US] * 8
     ch[2] = MIN_US  # Throttle
     for i in range(4, 8):
         ch[i] = MIN_US
+
+    # --- автопосадка большого дрона ---
+    auto_land = AutoLandController(
+        throttle_idx=2,
+        arm_idx=7,
+        min_us=MIN_US,
+        mid_us=MID_US,
+        descend_time_fast=autoland_cfg.get("descend_time_fast", 5.0),
+        descend_time_slow=autoland_cfg.get("descend_time_slow", 10.0),
+        settle_time=autoland_cfg.get("settle_time", 1.0),
+        attitude_delta=autoland_cfg.get("attitude_delta", RETURN_SPEED),
+        land_throttle_us=autoland_cfg.get("land_throttle_us", MIN_US),
+        disarm_on_land=autoland_cfg.get("disarm_on_land", True)
+    )
+
+    # --- автополёт назад большого дрона ---
+    auto_back = AutoBackController(
+        pitch_idx=1,
+        min_us=MIN_US,
+        mid_us=MID_US,
+        back_amplitude=autoback_cfg.get("back_amplitude", 20),
+        ramp_time=autoback_cfg.get("ramp_time", 0.5),
+        hold_time=autoback_cfg.get("hold_time", 0.1)
+    )
 
     send_interval = 1.0 / SEND_HZ
     last_send = 0.0
@@ -305,9 +366,10 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+
             elif event.type == pygame.KEYDOWN:
+                # ESC — посадить Tello (если летит) и выйти
                 if event.key == pygame.K_ESCAPE:
-                    # ESC: посадить Tello, выйти
                     if (tello_connected or tello_simulation) and tello_flying:
                         print("[tello] ESC → посадка / стоп симуляции")
                         if tello_connected and drone is not None:
@@ -318,14 +380,36 @@ def main():
                         tello_flying = False
                         auto_mode = False
                         square_mode = False
+
+                    if auto_land.is_active():
+                        auto_land.abort()
+
                     running = False
 
-                # CH5–CH7: двухпозиционные при ARM
-                if event.key == pygame.K_5 and armed:
+                # автопосадка: B/V
+                elif event.key == pygame.K_b:
+                    if armed and not auto_land.is_active():
+                        print("[big] AUTOLAND FAST (B)")
+                        auto_land.start(ch, now, mode="fast")
+                    elif auto_land.is_active():
+                        auto_land.abort()
+
+                elif event.key == pygame.K_v:
+                    if armed and not auto_land.is_active():
+                        print("[big] AUTOLAND SLOW (V)")
+                        auto_land.start(ch, now, mode="slow")
+                    elif auto_land.is_active():
+                        auto_land.abort()
+
+                # автополёт назад: X (циклично, логика внутри AutoBackController)
+                elif event.key == pygame.K_x:
+                    if armed:
+                        auto_back.start(ch, now)
+
+                # CH5–CH7
+                elif event.key == pygame.K_5 and armed:
                     prev_ch5 = ch[4]
                     ch[4] = next_two(ch[4])
-
-                    # LOW -> HIGH: планируем Throw&Go или симуляцию
                     if prev_ch5 <= MIN_US + 10 and ch[4] >= MAX_US - 10:
                         tello_takeoff_time = now
                         if tello_connected:
@@ -335,16 +419,14 @@ def main():
 
                 elif event.key == pygame.K_6 and armed:
                     ch[5] = next_two(ch[5])
+
                 elif event.key == pygame.K_7 and armed:
                     ch[6] = next_two(ch[6])
 
-                # CH8 (ARM/DISARM)
+                # ARM/DISARM
                 elif event.key == pygame.K_8:
                     ch[7] = next_two(ch[7])
 
-                elif event.key == pygame.K_c:
-                    for i in range(4, 8):
-                        ch[i] = MIN_US
                 elif event.key == pygame.K_SPACE:
                     for i in range(4, 8):
                         ch[i] = MIN_US
@@ -371,25 +453,41 @@ def main():
             ch[5] = MIN_US
             ch[6] = MIN_US
         else:
-            if keys[pygame.K_LEFT]:  ch[0] = clamp(ch[0] - step)
-            if keys[pygame.K_RIGHT]: ch[0] = clamp(ch[0] + step)
-            if keys[pygame.K_UP]:    ch[1] = clamp(ch[1] + step)
-            if keys[pygame.K_DOWN]:  ch[1] = clamp(ch[1] - step)
-            if keys[pygame.K_w]:     ch[2] = clamp(ch[2] + step)
-            if keys[pygame.K_s]:     ch[2] = clamp(ch[2] - step)
-            if keys[pygame.K_a]:     ch[3] = clamp(ch[3] - step)
-            if keys[pygame.K_d]:     ch[3] = clamp(ch[3] + step)
+            # ROLL (CH1) — руками
+            if keys[pygame.K_LEFT]:
+                ch[0] = clamp(ch[0] - step)
+            if keys[pygame.K_RIGHT]:
+                ch[0] = clamp(ch[0] + step)
 
-        def approach(v, target, delta):
-            if v < target - delta: return v + delta
-            if v > target + delta: return v - delta
-            return target
+            # PITCH (CH2) — руками, если нет автоспины назад
+            if not auto_back.is_active():
+                if keys[pygame.K_UP]:
+                    ch[1] = clamp(ch[1] + step)
+                if keys[pygame.K_DOWN]:
+                    ch[1] = clamp(ch[1] - step)
 
-        for i in (0, 1, 3):
-            if (i == 0 and not (keys[pygame.K_LEFT] or keys[pygame.K_RIGHT])) \
-                    or (i == 1 and not (keys[pygame.K_UP] or keys[pygame.K_DOWN])) \
-                    or (i == 3 and not (keys[pygame.K_a] or keys[pygame.K_d])):
-                ch[i] = approach(ch[i], MID_US, RETURN_SPEED)
+            # THROTTLE (CH3) — руками, если нет автопосадки
+            if not auto_land.is_active():
+                if keys[pygame.K_w]:
+                    ch[2] = clamp(ch[2] + step)
+                if keys[pygame.K_s]:
+                    ch[2] = clamp(ch[2] - step)
+
+            # YAW (CH4) — руками
+            if keys[pygame.K_a]:
+                ch[3] = clamp(ch[3] - step)
+            if keys[pygame.K_d]:
+                ch[3] = clamp(ch[3] + step)
+
+        # центрирование стиков
+        if not (keys[pygame.K_LEFT] or keys[pygame.K_RIGHT]):
+            ch[0] = approach(ch[0], MID_US, RETURN_SPEED)
+
+        if not auto_back.is_active() and not (keys[pygame.K_UP] or keys[pygame.K_DOWN]):
+            ch[1] = approach(ch[1], MID_US, RETURN_SPEED)
+
+        if not (keys[pygame.K_a] or keys[pygame.K_d]):
+            ch[3] = approach(ch[3], MID_US, RETURN_SPEED)
 
         # --- Tello: запуск Throw&Go / симуляции по таймеру ---
         if tello_takeoff_time is not None and now >= tello_takeoff_time and not tello_flying:
@@ -513,6 +611,13 @@ def main():
             except Exception:
                 video_surface = None
 
+        # --- обновляем автопосадку / авто-назад ---
+        if auto_land.is_active():
+            ch = auto_land.update(ch, now)
+
+        if auto_back.is_active():
+            ch = auto_back.update(ch, now)
+
         # --- отправка PPM ---
         if now - last_send >= send_interval:
             send_line(ser, ch)
@@ -526,8 +631,10 @@ def main():
             tello_connected, tello_simulation, tello_flying,
             auto_mode, square_mode,
             tello_lr, tello_fb, tello_ud, tello_yw,
-            video_surface
+            video_surface,
+            auto_land.current_mode()
         )
+
         pygame.display.flip()
 
     # --- выход ---
@@ -555,4 +662,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="PPM + Tello control UI")
+    parser.add_argument(
+        "--tello",
+        action="store_true",
+        help="включить поддержку Tello (подключение и управление им)"
+    )
+    args = parser.parse_args()
+
+    main(args)

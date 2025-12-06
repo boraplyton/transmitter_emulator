@@ -3,12 +3,43 @@
     "ports": ["/dev/ttyUSB0", "/dev/ttyACM0", "COM3", "COM4"],
     "baud": 115200
   },
+
   "control": {
     "min_us": 1000,
     "mid_us": 1500,
     "max_us": 2000,
-    "step": 1,
-    "fast_step": 3,
+    "step": 2,
+    "fast_step": 4,
     "buff_size": 200
+  },
+
+  "ui": {
+    "return_speed": 25,
+    "send_hz": 50
+  },
+
+  "tello": {
+    "manual_speed": 40,
+    "auto_speed": 30,
+    "auto_interval": 2.0,
+    "square_speed": 20,
+    "square_step_time": 2.0,
+    "fps": 20,
+    "sim_if_no_drone": true
+  },
+
+  "autoland": {
+    "descend_time_fast": 5.0,
+    "descend_time_slow": 10.0,
+    "settle_time": 1.0,
+    "attitude_delta": 25,
+    "land_throttle_us": 1500,
+    "disarm_on_land": true
+  },
+
+  "autoback": {
+    "back_amplitude": 20,
+    "ramp_time": 0.5,
+    "hold_time": 0.1
   }
 }
