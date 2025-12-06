@@ -38,7 +38,7 @@
   },
 
   "autoback": {
-    "back_amplitude": 20,
+    "back_amplitude": 30,
     "ramp_time": 0.5,
     "hold_time": 0.1
   }

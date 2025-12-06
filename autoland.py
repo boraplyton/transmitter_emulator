@@ -13,6 +13,10 @@ class AutoLandController:
     - управляет ТОЛЬКО газом (CH3) до land_throttle_us за время descend_time_(fast|slow)
     - остальные оси (roll/pitch/yaw) остаются под управлением пилота
     - по желанию может дёргать ARM (CH8) в MIN_US, если disarm_on_land=True
+
+    Дополнительно:
+    - если автопосадка включена при газе МЕНЬШЕ mid_us (обычно 1500),
+      сценарий не тянет газ, а сразу дизармит (если disarm_on_land=True).
     """
 
     def __init__(
@@ -37,6 +41,7 @@ class AutoLandController:
         self.settle_time = settle_time
         self.attitude_delta = attitude_delta
 
+        # если не задано явно — тянем до нижнего конца диапазона
         self.land_throttle_us = land_throttle_us if land_throttle_us is not None else self.min_us
         self.disarm_on_land = disarm_on_land
 
@@ -65,21 +70,42 @@ class AutoLandController:
             self.descend_time_fast if mode == "fast" else self.descend_time_slow
         )
 
+        self._start_throttle = ch[self.throttle_idx]
+
+        # === НОВАЯ ЛОГИКА: если газ ниже середины (1500), сразу дизармим ===
+        if self._start_throttle < self.mid_us:
+            if self.disarm_on_land:
+                ch[self.arm_idx] = self.min_us
+                print(
+                    f"[big] AUTOLAND IMMEDIATE DISARM: throttle={self._start_throttle} < {self.mid_us}"
+                )
+            else:
+                print(
+                    f"[big] AUTOLAND: throttle={self._start_throttle} < {self.mid_us}, сценарий не запускается"
+                )
+            # считаем сценарий мгновенно завершённым
+            self.active = False
+            self._phase = "done"
+            self._finished = True
+            self._current_mode = None
+            self._current_descend_time = None
+            self._start_time = None
+            self._settle_start = None
+            return
+
+        # обычный запуск автопосадки
         self.active = True
         self._finished = False
         self._phase = "descend"
         self._start_time = now
-        self._start_throttle = ch[self.throttle_idx]
         self._settle_start = None
-
-        # Можно один раз чуть «подровнять» стики, если хочешь, или вообще убрать эту строку:
-        # self._center_attitude(ch)
 
         print(
             f"[big] AUTOLAND START mode={self._current_mode}, "
             f"descend_time={self._current_descend_time:.1f}s, "
             f"target_throttle={self.land_throttle_us}, "
-            f"disarm_on_land={self.disarm_on_land}"
+            f"disarm_on_land={self.disarm_on_land}, "
+            f"start_throttle={self._start_throttle}"
         )
 
     def abort(self):

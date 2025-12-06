@@ -185,7 +185,7 @@ def draw_ui(screen, font, font_small,
         help_y = help_y_start
 
     help_lines = [
-        "PPM / TX12 Controls:",
+        "TX12 Controls:",
         "  ←/→ = CH1 (Roll)",
         "  ↑/↓ = CH2 (Pitch)",
         "  W/S = CH3 (Throttle)",
@@ -193,21 +193,19 @@ def draw_ui(screen, font, font_small,
         "  5/6/7 = AUX5–7 (2-pos)",
         "  8 = ARM/DISARM",
         "  Space = kill AUX",
+        "  B = AutoLand FAST",
+        "  V = AutoLand SLOW",
+        "  X = AutoBack (цикл назад-вперёд)",
         "",
         "Tello Controls:",
-        "  --tello для включения Tello-режима",
         "  CH5 HIGH (при ARM) → Throw&Go / симуляция взлёта.",
         "  g/j = yaw, y/h = up/down",
         "  k/; = left/right",
         "  o/l = forward/back",
         "  M = авто-маятник (LR)",
         "  N = маленький квадрат",
-        "  P = посадка (или стоп симуляции)",
+        "  P = посадка",
         "",
-        "Big Drone:",
-        "  B = AutoLand FAST",
-        "  V = AutoLand SLOW",
-        "  X = AutoBack (цикл назад-вперёд)",
     ]
 
     for n, line in enumerate(help_lines):
@@ -387,14 +385,14 @@ def main(args):
                     running = False
 
                 # автопосадка: B/V
-                elif event.key == pygame.K_b:
+                elif event.key == pygame.K_v:
                     if armed and not auto_land.is_active():
                         print("[big] AUTOLAND FAST (B)")
                         auto_land.start(ch, now, mode="fast")
                     elif auto_land.is_active():
                         auto_land.abort()
 
-                elif event.key == pygame.K_v:
+                elif event.key == pygame.K_b:
                     if armed and not auto_land.is_active():
                         print("[big] AUTOLAND SLOW (V)")
                         auto_land.start(ch, now, mode="slow")
