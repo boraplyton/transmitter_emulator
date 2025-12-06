@@ -4,6 +4,7 @@ import serial
 import json, os, sys
 
 from djitellopy import Tello  # управление Tello
+import cv2                    # видео с камеры Tello
 
 # === загрузка конфигурации ===
 CONFIG_FILE = "config.json"
@@ -39,7 +40,7 @@ TELLO_AUTO_INTERVAL = 2.0      # каждые N секунд меняем нап
 TELLO_SQUARE_SPEED = 20        # квадрат (N) — маленький для квартиры
 TELLO_SQUARE_STEP_TIME = 2.0   # длительность одной стороны квадрата, сек
 
-TELLO_FPS = 20                 # частота отправки RC-команд
+TELLO_FPS = 20                 # "целевая" частота отправки RC-команд
 TELLO_SIM_IF_NO_DRONE = True   # включать "симуляцию", если Tello не подключился
 
 
@@ -85,7 +86,8 @@ def draw_ui(screen, font, font_small,
             ch, fps, portname, ser_connected,
             tello_connected, tello_simulation, tello_flying,
             auto_mode, square_mode,
-            tello_lr, tello_fb, tello_ud, tello_yw):
+            tello_lr, tello_fb, tello_ud, tello_yw,
+            video_surface):
 
     screen.fill((18, 18, 22))
     w, h = screen.get_size()
@@ -153,11 +155,19 @@ def draw_ui(screen, font, font_small,
             screen.blit(txt, (left_x - 100, y + 10))
 
     # =======================
-    #   Правый блок — подсказки
+    #   Правый блок — видео + подсказки
     # =======================
     help_x = 600
-    help_y = 80
     line_h = 22
+
+    help_y_start = 80
+
+    # Видео (если есть кадр)
+    if video_surface is not None:
+        screen.blit(video_surface, (help_x, help_y_start))
+        help_y = help_y_start + video_surface.get_height() + 10
+    else:
+        help_y = help_y_start
 
     help_lines = [
         "PPM / TX12 Controls:",
@@ -171,7 +181,7 @@ def draw_ui(screen, font, font_small,
         "",
         "Tello Controls:",
         "  Коннект при запуске (если доступен).",
-        "  CH5 HIGH (при ARM) → через 1с Throw&Go / симуляция взлёта.",
+        "  CH5 HIGH (при ARM) → Throw&Go / симуляция взлёта.",
         "  g/j = yaw, y/h = up/down",
         "  k/; = left/right",
         "  o/l = forward/back",
@@ -222,7 +232,7 @@ def main():
     ser_connected = ser is not None
 
     pygame.init()
-    pygame.display.set_caption("PPM + Tello Control (Матка + Tello)")
+    pygame.display.set_caption("Каналы управления")
     screen = pygame.display.set_mode((1400, 800))
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("DejaVu Sans", 26)
@@ -230,6 +240,7 @@ def main():
 
     # --- Tello ---
     drone = None
+    frame_read = None
     tello_connected = False
     tello_simulation = False        # режим "управление без дрона"
     tello_flying = False
@@ -256,11 +267,17 @@ def main():
             print(f"[tello] battery: {batt}%")
         except Exception:
             print("[tello] battery read failed")
+
+        # запускаем видео-поток
+        drone.streamon()
+        frame_read = drone.get_frame_read()
+
         tello_connected = True
     except Exception as e:
         print(f"[tello] connect failed: {e}")
         drone = None
         tello_connected = False
+        frame_read = None
         if TELLO_SIM_IF_NO_DRONE:
             tello_simulation = True
             print("[tello] simulation mode enabled (no physical drone)")
@@ -481,6 +498,21 @@ def main():
                 except Exception as e:
                     print(f"[tello] send_rc_control error: {e}")
 
+        # --- получение кадра Tello для отображения ---
+        video_surface = None
+        if tello_connected and frame_read is not None:
+            try:
+                frame = frame_read.frame  # numpy (BGR)
+                if frame is not None:
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    video_w, video_h = 640, 360
+                    frame_rgb = cv2.resize(frame_rgb, (video_w, video_h))
+                    video_surface = pygame.image.frombuffer(
+                        frame_rgb.tobytes(), (video_w, video_h), "RGB"
+                    )
+            except Exception:
+                video_surface = None
+
         # --- отправка PPM ---
         if now - last_send >= send_interval:
             send_line(ser, ch)
@@ -493,7 +525,8 @@ def main():
             ch, fps, portname, ser_connected,
             tello_connected, tello_simulation, tello_flying,
             auto_mode, square_mode,
-            tello_lr, tello_fb, tello_ud, tello_yw
+            tello_lr, tello_fb, tello_ud, tello_yw,
+            video_surface
         )
         pygame.display.flip()
 
@@ -509,6 +542,10 @@ def main():
                 drone.land()
         except Exception as e:
             print(f"[tello] final land error: {e}")
+        try:
+            drone.streamoff()
+        except Exception:
+            pass
         try:
             drone.end()
         except Exception:
