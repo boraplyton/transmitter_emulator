@@ -73,25 +73,25 @@ class AutoLandController:
         self._start_throttle = ch[self.throttle_idx]
 
         # === НОВАЯ ЛОГИКА: если газ ниже середины (1500), сразу дизармим ===
-        if self._start_throttle < self.mid_us:
-            if self.disarm_on_land:
-                ch[self.arm_idx] = self.min_us
-                print(
-                    f"[big] AUTOLAND IMMEDIATE DISARM: throttle={self._start_throttle} < {self.mid_us}"
-                )
-            else:
-                print(
-                    f"[big] AUTOLAND: throttle={self._start_throttle} < {self.mid_us}, сценарий не запускается"
-                )
-            # считаем сценарий мгновенно завершённым
-            self.active = False
-            self._phase = "done"
-            self._finished = True
-            self._current_mode = None
-            self._current_descend_time = None
-            self._start_time = None
-            self._settle_start = None
-            return
+        # if self._start_throttle < self.mid_us:
+        #     if self.disarm_on_land:
+        #         ch[self.arm_idx] = self.min_us
+        #         print(
+        #             f"[big] AUTOLAND IMMEDIATE DISARM: throttle={self._start_throttle} < {self.mid_us}"
+        #         )
+        #     else:
+        #         print(
+        #             f"[big] AUTOLAND: throttle={self._start_throttle} < {self.mid_us}, сценарий не запускается"
+        #         )
+        #     # считаем сценарий мгновенно завершённым
+        #     self.active = False
+        #     self._phase = "done"
+        #     self._finished = True
+        #     self._current_mode = None
+        #     self._current_descend_time = None
+        #     self._start_time = None
+        #     self._settle_start = None
+        #     return
 
         # обычный запуск автопосадки
         self.active = True

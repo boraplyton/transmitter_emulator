@@ -29,11 +29,11 @@
   },
 
   "autoland": {
-    "descend_time_fast": 5.0,
-    "descend_time_slow": 10.0,
+    "descend_time_fast": 7.0,
+    "descend_time_slow": 20.0,
     "settle_time": 1.0,
     "attitude_delta": 25,
-    "land_throttle_us": 1500,
+    "land_throttle_us": 1370,
     "disarm_on_land": true
   },
 
